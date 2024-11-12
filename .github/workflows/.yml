@@ -1,0 +1,188 @@
+name: 리액트 빌드 / 배포 Actions # workflow 이름
+
+on: # workflow 실행 조건
+  push:
+    branches: [main, dev] # 메인, 데브 브랜치에 푸쉬된 경우
+  pull_request:
+    branches: [main, dev] # 메인, 데브 브랜치에 pr 생성한 경우
+
+jobs: # job 설정
+  test-dev-pr_push:
+    runs-on: ubuntu-20.04
+    if: github.base_ref == 'dev' || github.ref == 'refs/heads/dev'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # Cypress tests
+      - name: Cypress run
+        uses: cypress-io/github-action@v4
+        with:
+          start: yarn start-dev
+          wait-on: "http://localhost:3000" #yarn start 완료까지 기다림
+          browser: chrome # test browser 환경
+          config: baseUrl=http://localhost:3000
+          env: CYPRESS_URL=http://localhost:3000
+
+  test-prod-push:
+    runs-on: ubuntu-20.04
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # Cypress tests
+      - name: Cypress run
+        uses: cypress-io/github-action@v4
+        with:
+          start: yarn start-prod
+          wait-on: "http://localhost:3000" #yarn start 완료까지 기다림
+          browser: chrome # test browser 환경
+          config: baseUrl=http://localhost:3000
+          env: CYPRESS_URL=http://localhost:3000
+
+  deploy-dev: # job id
+    name: 리액트 Develop build & deploy
+    runs-on: ubuntu-20.04
+    if: github.ref == 'refs/heads/dev'
+    needs: test-dev-pr_push
+    environment: Develop
+
+    env:
+      # Treating warnings as errors because process.env.CI = true. 에러 나올경우 고려
+      CI: false
+
+    steps: #react build
+      - uses: actions/checkout@v3
+
+      - name: Get yarn cache
+        id: yarn-cache-dir
+        run: echo "::set-output name=dir::$(yarn cache dir)"
+      - uses: actions/cache@v3
+        id: yarn-cache
+        with:
+          path: ${{ steps.yarn-cache-dir.outputs.dir }}
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      # yarn 패키지 설치
+      - name: yarn
+        run: yarn
+
+      - name: React Dev build
+        run: yarn build-dev
+
+      # aws user 연결
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-3
+
+      # react 빌드한 /build를 s3로 업로드
+      - name: Upload to S3
+        env:
+          BUCKET_NAME_DEV: ${{ secrets.AWS_S3_BUCKET_NAME_DEV}}
+        run: |
+          aws s3 sync \
+          ./build s3://$BUCKET_NAME_DEV
+
+      # 업로드한 s3 파일을 각 CDN 캐시 무효화하여 리프레시 하기
+      - name: CloudFront Invalidation
+        env:
+          CLOUD_FRONT_ID_DEV: ${{ secrets.AWS_CLOUDFRONT_ID_DEV}}
+        run: |
+          aws cloudfront create-invalidation --distribution-id $CLOUD_FRONT_ID_DEV --paths / /index.html /error.html /service-worker.js /manifest.json /favicon.ico
+
+  deploy-prod: # job id
+    name: 리액트 Production build & deploy
+    runs-on: ubuntu-20.04
+    if: github.ref == 'refs/heads/main'
+    needs: test-prod-push
+    environment: Production
+
+    env:
+      # Treating warnings as errors because process.env.CI = true. 에러 나올경우 고려
+      CI: false
+
+    steps: #react build
+      - uses: actions/checkout@v3
+
+      - name: Get yarn cache
+        id: yarn-cache-dir
+        run: echo "::set-output name=dir::$(yarn cache dir)"
+      - uses: actions/cache@v3
+        id: yarn-cache
+        with:
+          path: ${{ steps.yarn-cache-dir.outputs.dir }}
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      # yarn 패키지 설치
+      - name: yarn
+        run: yarn
+
+      - name: React Prod build
+        run: yarn build-prod
+
+      # aws user 연결
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      # react 빌드한 /build를 s3로 업로드
+      - name: Upload to S3
+        env:
+          BUCKET_NAME_PROD: ${{ secrets.AWS_S3_BUCKET_NAME_PROD}}
+        run: |
+          aws s3 sync \
+          ./build s3://$BUCKET_NAME_PROD
+
+      # 업로드한 s3 파일을 각 CDN 캐시 무효화하여 리프레시 하기
+      - name: CloudFront Invalidation
+        env:
+          CLOUD_FRONT_ID_PROD: ${{ secrets.AWS_CLOUDFRONT_ID_PROD}}
+        run: |
+          aws cloudfront create-invalidation --distribution-id $CLOUD_FRONT_ID_PROD --paths / /index.html /error.html /service-worker.js /manifest.json /favicon.ico
+
+  test-dev:
+    runs-on: ubuntu-20.04
+    if: github.ref == 'refs/heads/dev'
+    needs: deploy-dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # Cypress tests
+      - name: Cypress run
+        uses: cypress-io/github-action@v4
+        with:
+          browser: chrome # test browser 환경
+          config: baseUrl=https://dev-axcloudv4.axchange.co
+          env: CYPRESS_URL=https://dev-internal-api.axchange.co/
+
+  test-prod:
+    runs-on: ubuntu-20.04
+    if: github.ref == 'refs/heads/main'
+    needs: deploy-prod
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # Cypress tests
+      - name: Cypress run
+        uses: cypress-io/github-action@v4
+        with:
+          browser: chrome # test browser 환경
+          config: baseUrl=https://ax-cloud.com
+          env: CYPRESS_URL=https://internal-api.axchange.co/
